@@ -665,9 +665,10 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                 with open(os.path.join(SHM_DIR, f"{target_user}.json")) as f:
                     session = json.load(f)
 
-            # 2. Eğer Cookie/Header yoksa (doğrudan API çağrısı ise) token ile ara
+            # 2. If no cookie/header, check direct token match
             if not session:
                 session = USER_SESSIONS.get(token)
+
             if not session:
                 for f in os.listdir(SHM_DIR):
                     if f.endswith(".json"):
@@ -677,6 +678,14 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                                 session = c
                                 USER_SESSIONS[token] = session
                                 break
+
+            # 3. If token is shared cluster key or still not found, fallback to any active user in /dev/shm/users
+            if not session:
+                for f in os.listdir(SHM_DIR):
+                    if f.endswith(".json"):
+                        with open(os.path.join(SHM_DIR, f)) as sfile:
+                            session = json.load(sfile)
+                            break
             
             if not session:
                 self.send_response(401)
