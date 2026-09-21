@@ -1,0 +1,5 @@
+*.secret.yaml
+*session.json
+*.env
+.DS_Store
+*.zip

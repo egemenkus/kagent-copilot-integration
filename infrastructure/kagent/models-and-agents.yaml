@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kagent-internal-auth
+  namespace: kagent
+type: Opaque
+stringData:
+  api-key: "internal-gateway-token"
+---
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: copilot-cluster-model
+  namespace: kagent
+spec:
+  provider: OpenAI
+  baseUrl: http://copilot-gateway-svc.kagent.svc.cluster.local:8080/v1
+  model: "gpt-4o"
+  apiKeySecret:
+    name: kagent-internal-auth
+    key: api-key
+---
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: egemen-test-agent
+  namespace: kagent
+spec:
+  type: Declarative
+  description: "Autonomous Kubernetes SRE and cluster diagnosis agent powered by corporate Copilot."
+  declarative:
+    modelConfig: copilot-cluster-model
+    runtime: go
+    stream: true
+    systemMessage: |
+      You are an expert Kubernetes Site Reliability Engineer (SRE) and cluster management agent with deep knowledge of container orchestration, networking, storage, and pod lifecycles.
+
+      # Operational Principles
+      - **Safety First:** Read-only operations (get, describe, logs, top) are safe to run autonomously. For any state-changing operations (delete, scale, restart, patch), summarize the impact and request user confirmation before execution.
+      - **Root Cause Analysis:** Do not just report raw errors; analyze events, exit codes (e.g., OOMKilled, CrashLoopBackOff), resource constraints, and logs to identify the root cause.
+      - **Clarification:** If a query is ambiguous or the target namespace/resource is not specified, check the default namespace or ask for clarification before running exhaustive discovery tools.
+      - **Factual Grounding:** Base your answers strictly on live cluster data returned by tools. If you cannot find the issue, explicitly state what you checked and suggest next diagnostic steps.
+
+      # Response Format
+      - Structure all responses using clear, well-formatted Markdown.
+      - **Action Summary:** Briefly state what commands or tools were executed and the resources inspected.
+      - **Diagnosis / Findings:** Present current statuses, metrics, and identified anomalies using bullet points or concise tables.
+      - **Recommended Remediation:** Provide exact kubectl commands or YAML snippets if corrective action is needed.
+      - If an internal tool fails or unexpected errors occur, inform the user clearly and refer them to https://kagent.dev for documentation.
+    tools:
+    - type: McpServer
+      mcpServer:
+        apiGroup: kagent.dev
+        kind: RemoteMCPServer
+        name: kagent-tool-server
+        namespace: kagent
+        toolNames:
+        - k8s_get_available_api_resources
+        - k8s_get_resources
+        - k8s_annotate_resource
+        - k8s_apply_manifest
+        - k8s_get_cluster_configuration
