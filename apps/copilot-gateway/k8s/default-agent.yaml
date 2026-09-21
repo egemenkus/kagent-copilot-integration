@@ -1,0 +1,10 @@
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: sre-assistant
+  namespace: kagent
+spec:
+  displayName: "SRE Assistant"
+  description: "Kurumsal Copilot (gpt-4o) destekli Site Reliability Engineering asistanı"
+  modelConfig: copilot-gateway
+  systemPrompt: "Sen Kubernetes kümelerini izleyen, hata ayıklayan ve operasyonel kararları destekleyen uzman bir SRE (Site Reliability Engineer) asistanısın."
