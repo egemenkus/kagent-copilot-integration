@@ -386,6 +386,9 @@ PORTAL_HTML = """<!DOCTYPE html>
                 🚀 <strong>Kagent UI</strong> üzerinde <code id="modelInline" style="color:#60a5fa;">copilot-...</code> modelinizi seçip ajanlarınızı kesintisiz çalıştırabilirsiniz.
             </p>
 
+            <a id="btnGoChat" class="btn" href="http://chat.kagent.local" style="margin-top:16px; background:#10b981; color:#fff; display:none;">
+                Kagent Chat'e Git (2sn içinde yönlendiriliyor...) ↗
+            </a>
             <button class="btn-logout" onclick="logout()">Oturumu Sonlandır</button>
         </div>
     </div>
@@ -428,6 +431,13 @@ PORTAL_HTML = """<!DOCTYPE html>
             document.getElementById('userDisplay').innerText = '@' + username;
             document.getElementById('modelDisplay').innerText = modelName;
             document.getElementById('modelInline').innerText = modelName;
+
+            // Chat UI'a git butonu veya otomatik yönlendirme
+            const btnGo = document.getElementById('btnGoChat');
+            if (btnGo) {
+                btnGo.style.display = 'inline-flex';
+                setTimeout(() => { window.location.href = "http://chat.kagent.local"\; }, 2000);
+            }
         }
 
         async function startAuth() {
@@ -501,14 +511,48 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                 return cookie[name].value
         return None
 
+    def do_HEAD(self):
+        self.do_GET()
+
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
         
-        if url.path == "/" or url.path == "/login":
+        if url.path == "/api/auth/verify":
+            cookie_id = self.get_cookie("kagent_session")
+            username = SESSION_COOKIES.get(cookie_id)
+            if not username:
+                qs = urllib.parse.parse_qs(url.query)
+                req_u = qs.get("username", [None])[0]
+                if req_u and os.path.exists(os.path.join(SHM_DIR, f"{req_u}.json")):
+                    username = req_u
+
+            if username and os.path.exists(os.path.join(SHM_DIR, f"{username}.json")):
+                self.send_response(200)
+                self.send_header("X-Auth-User", username)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self.send_response(401)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            return
+
+        elif url.path == "/" or url.path == "/login":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(PORTAL_HTML.encode("utf-8"))
+
+                elif url.path == "/api/auth/verify":
+            cookie_id = self.get_cookie("kagent_session")
+            username = SESSION_COOKIES.get(cookie_id)
+            if username and os.path.exists(os.path.join(SHM_DIR, f"{username}.json")):
+                self.send_response(200)
+                self.send_header("X-Auth-User", username)
+                self.end_headers()
+            else:
+                self.send_response(401)
+                self.end_headers()
 
         elif url.path == "/api/auth/me":
             cookie_id = self.get_cookie("kagent_session")
@@ -575,7 +619,7 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
 
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
-                    self.send_header("Set-Cookie", f"kagent_session={sid}; Path=/; Max-Age=2592000; SameSite=Lax")
+                    self.send_header("Set-Cookie", f"kagent_session={sid}; Path=/; Domain=.kagent.local; Max-Age=2592000; SameSite=Lax")
                     self.end_headers()
                     self.wfile.write(json.dumps({"status": "success", "username": username, "api_key": api_key}).encode())
                 except Exception as ex:
@@ -617,7 +661,7 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             if sid in SESSION_COOKIES:
                 del SESSION_COOKIES[sid]
             self.send_response(200)
-            self.send_header("Set-Cookie", "kagent_session=; Path=/; Max-Age=0")
+            self.send_header("Set-Cookie", "kagent_session=; Path=/; Domain=.kagent.local; Max-Age=0")
             self.end_headers()
             self.wfile.write(b"OK")
 
