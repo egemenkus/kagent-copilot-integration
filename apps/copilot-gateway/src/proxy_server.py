@@ -1,85 +1,12 @@
-
-import subprocess
-
-def ensure_user_k8s_resources(username, api_key):
-    namespace = "kagent"
-    model_config_name = f"copilot-model-{username}"
-    agent_name = f"sre-assistant-{username}"
-    
-    # 1. ModelConfig Manifest
-    mc_yaml = f"""
-apiVersion: kagent.dev/v1alpha2
-kind: ModelConfig
-metadata:
-  name: {model_config_name}
-  namespace: {namespace}
-spec:
-  provider: openai
-  baseUrl: http://copilot-gateway-svc.kagent.svc.cluster.local:8080/v1
-  apiKeySecret:
-    name: user-token-{username}
-    key: api-key
-  model: gpt-4o
-"""
-    # 2. Secret Manifest (Kullanıcıya özel token)
-    secret_yaml = f"""
-apiVersion: v1
-kind: Secret
-metadata:
-  name: user-token-{username}
-  namespace: {namespace}
-type: Opaque
-stringData:
-  api-key: "{api_key}"
-"""
-    
-    # 3. Agent Manifest (Kullanıcıya özel izole SRE Assistant)
-    agent_yaml = f"""
-apiVersion: kagent.dev/v1alpha2
-kind: Agent
-metadata:
-  name: {agent_name}
-  namespace: {namespace}
-spec:
-  type: Declarative
-  description: "Personal SRE Assistant for {username}"
-  declarative:
-    runtime: go
-    stream: true
-    modelConfig: {model_config_name}
-    systemMessage: "You are an expert SRE assistant dedicated to {username}. Use available tools safely."
-    tools:
-    - type: McpServer
-      mcpServer:
-        apiGroup: kagent.dev
-        kind: RemoteMCPServer
-        name: kagent-tool-server
-        namespace: {namespace}
-        toolNames:
-        - k8s_get_available_api_resources
-        - k8s_get_resources
-        - k8s_annotate_resource
-        - k8s_apply_manifest
-        - k8s_get_cluster_configuration
-"""
-    
-    # Kapply via kubectl stdin
-    for manifest in [secret_yaml, mc_yaml, agent_yaml]:
-        try:
-            p = subprocess.Popen(["kubectl", "apply", "-f", "-"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            p.communicate(input=manifest.encode())
-        except Exception as e:
-            print(f"Error applying resource for {username}: {e}")
-
+import base64
+import http.cookies
 import http.server
 import json
 import os
+import secrets
+import threading
 import time
 import urllib.parse
-import threading
-import secrets
-import base64
-import http.cookies
 import requests
 
 PORT = int(os.environ.get("PORT", 8080))
@@ -95,8 +22,9 @@ COPILOT_HEADERS = {
     "User-Agent": "GitHubCopilotChat/0.22.0",
     "Editor-Version": "vscode/1.93.0",
     "Editor-Plugin-Version": "copilot-chat/0.22.0",
-    "Accept": "application/json"
+    "Accept": "application/json",
 }
+
 
 def get_k8s_context():
     token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
@@ -107,23 +35,46 @@ def get_k8s_context():
         k8s_token = f.read().strip()
     return k8s_token, ca_path
 
+
 def apply_k8s_resource(url, manifest, ca_path, k8s_token):
-    headers = {"Authorization": f"Bearer {k8s_token}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {k8s_token}",
+        "Content-Type": "application/json",
+    }
     try:
-        resp = requests.post(url, json=manifest, headers=headers, verify=ca_path, timeout=5)
+        resp = requests.post(
+            url, json=manifest, headers=headers, verify=ca_path, timeout=5
+        )
         if resp.status_code == 409:
             name = manifest["metadata"]["name"]
-            requests.put(f"{url}/{name}", json=manifest, headers=headers, verify=ca_path, timeout=5)
+            resp = requests.put(
+                f"{url}/{name}",
+                json=manifest,
+                headers=headers,
+                verify=ca_path,
+                timeout=5,
+            )
+        if resp.status_code not in [200, 201]:
+            print(
+                f"[K8s Apply Warning] {manifest.get('kind')} ({manifest['metadata'].get('name')}): HTTP {resp.status_code} - {resp.text}",
+                flush=True,
+            )
     except Exception as e:
         print(f"[K8s Apply Error] {manifest.get('kind')}: {e}", flush=True)
+
 
 def provision_user_k8s_resources(username, api_key, session_data):
     k8s_token, ca_path = get_k8s_context()
     if not k8s_token:
+        print(
+            "[Provision Warning] In-cluster K8s credentials bulunamadı.",
+            flush=True,
+        )
         return
 
     uname_lower = username.lower()
 
+    # 1. Oturum Verisini Secret Olarak Kaydet (Session Store)
     sec_name = f"copilot-user-{uname_lower}"
     raw_payload = json.dumps(session_data).encode("utf-8")
     b64_payload = base64.b64encode(raw_payload).decode("utf-8")
@@ -132,23 +83,96 @@ def provision_user_k8s_resources(username, api_key, session_data):
         "kind": "Secret",
         "metadata": {"name": sec_name, "namespace": "kagent"},
         "type": "Opaque",
-        "data": {"session": b64_payload}
+        "data": {"session": b64_payload},
     }
-    apply_k8s_resource("https://kubernetes.default.svc/api/v1/namespaces/kagent/secrets", session_manifest, ca_path, k8s_token)
+    apply_k8s_resource(
+        "https://kubernetes.default.svc/api/v1/namespaces/kagent/secrets",
+        session_manifest,
+        ca_path,
+        k8s_token,
+    )
 
-    kagent_sec_name = f"kagent-user-{uname_lower}"
+    # 2. Kagent İçin API Key Secret'ı
+    kagent_sec_name = f"kagent-token-{uname_lower}"
     b64_key = base64.b64encode(api_key.encode("utf-8")).decode("utf-8")
     key_manifest = {
         "apiVersion": "v1",
         "kind": "Secret",
         "metadata": {"name": kagent_sec_name, "namespace": "kagent"},
         "type": "Opaque",
-        "data": {"api-key": b64_key}
+        "data": {"api-key": b64_key},
     }
-    apply_k8s_resource("https://kubernetes.default.svc/api/v1/namespaces/kagent/secrets", key_manifest, ca_path, k8s_token)
+    apply_k8s_resource(
+        "https://kubernetes.default.svc/api/v1/namespaces/kagent/secrets",
+        key_manifest,
+        ca_path,
+        k8s_token,
+    )
 
-    # Multi-tenant yapıda tek bir paylaşımlı ModelConfig kullanılır, kişisel CRD üretilmez.
-    print(f"[Provision] {username} ModelConfig & Secret basariyla senkronize edildi.", flush=True)
+    # 3. Dinamik ModelConfig Tanımı
+    mc_name = f"copilot-{uname_lower}"
+    mc_manifest = {
+        "apiVersion": "kagent.dev/v1alpha2",
+        "kind": "ModelConfig",
+        "metadata": {"name": mc_name, "namespace": "kagent"},
+        "spec": {
+            "provider": "OpenAI",
+            "model": "gpt-4o",
+            "apiKeySecret": kagent_sec_name,
+            "apiKeySecretKey": "api-key",
+            "openAI": {
+                "baseUrl": "http://copilot-gateway-svc.kagent.svc.cluster.local:8080/v1"
+            },
+        },
+    }
+    apply_k8s_resource(
+        "https://kubernetes.default.svc/apis/kagent.dev/v1alpha2/namespaces/kagent/modelconfigs",
+        mc_manifest,
+        ca_path,
+        k8s_token,
+    )
+
+    # 4. Dinamik Read-Only Agent Tanımı
+    agent_name = f"{uname_lower}-assistant"
+    agent_manifest = {
+        "apiVersion": "kagent.dev/v1alpha2",
+        "kind": "Agent",
+        "metadata": {"name": agent_name, "namespace": "kagent"},
+        "spec": {
+            "type": "Declarative",
+            "description": f"Personal Kubernetes Assistant for {username}",
+            "declarative": {
+                "runtime": "go",
+                "stream": True,
+                "modelConfig": mc_name,
+                "systemMessage": "You are a read-only Kubernetes SRE assistant. Safely inspect, list, get, and describe resources. Never perform destructive or mutating operations.",
+                "tools": [
+                    {
+                        "type": "McpServer",
+                        "mcpServer": {
+                            "apiGroup": "kagent.dev",
+                            "kind": "RemoteMCPServer",
+                            "name": "kagent-tools",
+                            "namespace": "kagent",
+                            "toolNames": ["*"],
+                        },
+                    }
+                ],
+            },
+        },
+    }
+    apply_k8s_resource(
+        "https://kubernetes.default.svc/apis/kagent.dev/v1alpha2/namespaces/kagent/agents",
+        agent_manifest,
+        ca_path,
+        k8s_token,
+    )
+
+    print(
+        f"[Provision] {username} için K8s kaynakları (Secret, ModelConfig, Agent) başarıyla senkronize edildi.",
+        flush=True,
+    )
+
 
 def save_user_session(username, data):
     user_file = os.path.join(SHM_DIR, f"{username}.json")
@@ -157,7 +181,12 @@ def save_user_session(username, data):
         json.dump(data, f)
     os.replace(tmp_file, user_file)
 
-    threading.Thread(target=provision_user_k8s_resources, args=(username, data["api_key"], data), daemon=True).start()
+    threading.Thread(
+        target=provision_user_k8s_resources,
+        args=(username, data["api_key"], data),
+        daemon=True,
+    ).start()
+
 
 def load_sessions_from_k8s():
     k8s_token, ca_path = get_k8s_context()
@@ -180,18 +209,28 @@ def load_sessions_from_k8s():
                         with open(save_file, "w") as sf:
                             json.dump(sess, sf)
                         USER_SESSIONS[sess["api_key"]] = sess
-                        print(f"[Init Bootstrap] {uname} oturumu Secret'tan RAM'e aktarildi.", flush=True)
+                        print(
+                            f"[Init Bootstrap] {uname} oturumu Secret'tan RAM'e aktarıldı.",
+                            flush=True,
+                        )
     except Exception as e:
-        print(f"[Init Warning] Oturumlar yuklenemedi: {e}", flush=True)
+        print(f"[Init Warning] Oturumlar yüklenemedi: {e}", flush=True)
+
 
 load_sessions_from_k8s()
+
 
 def fetch_copilot_token(github_token):
     headers = dict(COPILOT_HEADERS)
     headers["Authorization"] = f"token {github_token}"
-    resp = requests.get("https://api.github.com/copilot_internal/v2/token", headers=headers, timeout=10)
+    resp = requests.get(
+        "https://api.github.com/copilot_internal/v2/token",
+        headers=headers,
+        timeout=10,
+    )
     resp.raise_for_status()
     return resp.json()
+
 
 def background_rotator():
     while True:
@@ -202,17 +241,21 @@ def background_rotator():
                 filepath = os.path.join(SHM_DIR, user_file)
                 with open(filepath) as f:
                     data = json.load(f)
-                
+
                 if time.time() >= (data.get("expires_at", 0) - 300):
                     new_token = fetch_copilot_token(data["github_token"])
                     data["copilot_token"] = new_token["token"]
                     data["expires_at"] = new_token["expires_at"]
                     save_user_session(data["username"], data)
                     USER_SESSIONS[data["api_key"]] = data
-                    print(f"[Rotator] {data['username']} token yenilendi.", flush=True)
+                    print(
+                        f"[Rotator] {data['username']} token yenilendi.",
+                        flush=True,
+                    )
         except Exception as e:
             print(f"[Rotator Error] {e}", flush=True)
         time.sleep(60)
+
 
 threading.Thread(target=background_rotator, daemon=True).start()
 
@@ -480,7 +523,7 @@ PORTAL_HTML = """<!DOCTYPE html>
             document.getElementById('codeBox').style.display = 'none';
             document.getElementById('activeSessionBox').style.display = 'block';
 
-            const modelName = 'copilot-gateway';
+            const modelName = 'copilot-' + username.toLowerCase();
             document.getElementById('userDisplay').innerText = '@' + username;
             document.getElementById('modelDisplay').innerText = modelName;
 
@@ -488,7 +531,7 @@ PORTAL_HTML = """<!DOCTYPE html>
             if (btnGo) {
                 btnGo.style.display = 'inline-flex';
                 const targetRd = new URLSearchParams(window.location.search).get('rd') || 'http://chat.kagent.local';
-            setTimeout(() => { window.location.href = targetRd; }, 1500);
+                setTimeout(() => { window.location.href = targetRd; }, 1500);
             }
         }
 
@@ -555,6 +598,7 @@ PORTAL_HTML = """<!DOCTYPE html>
 </html>
 """
 
+
 class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
@@ -576,10 +620,14 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                 if not username:
                     qs = urllib.parse.parse_qs(url.query)
                     req_u = qs.get("username", [None])[0]
-                    if req_u and os.path.exists(os.path.join(SHM_DIR, f"{req_u}.json")):
+                    if req_u and os.path.exists(
+                        os.path.join(SHM_DIR, f"{req_u}.json")
+                    ):
                         username = req_u
 
-                if username and os.path.exists(os.path.join(SHM_DIR, f"{username}.json")):
+                if username and os.path.exists(
+                    os.path.join(SHM_DIR, f"{username}.json")
+                ):
                     self.send_response(200)
                     self.send_header("X-Auth-User", username)
                     self.send_header("Content-Length", "0")
@@ -608,14 +656,22 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             if not username:
                 qs = urllib.parse.parse_qs(url.query)
                 req_user = qs.get("username", [None])[0]
-                if req_user and os.path.exists(os.path.join(SHM_DIR, f"{req_user}.json")):
+                if req_user and os.path.exists(
+                    os.path.join(SHM_DIR, f"{req_user}.json")
+                ):
                     username = req_user
 
-            if username and os.path.exists(os.path.join(SHM_DIR, f"{username}.json")):
+            if username and os.path.exists(
+                os.path.join(SHM_DIR, f"{username}.json")
+            ):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"authenticated": True, "username": username}).encode())
+                self.wfile.write(
+                    json.dumps(
+                        {"authenticated": True, "username": username}
+                    ).encode()
+                )
             else:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -634,10 +690,18 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             data = {
                 "client_id": COPILOT_CLIENT_ID,
                 "device_code": device_code,
-                "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             }
             try:
-                resp = requests.post(token_url, json=data, headers={"Accept": "application/json", "User-Agent": "GitHubCopilotChat/0.22.0"}, timeout=10)
+                resp = requests.post(
+                    token_url,
+                    json=data,
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": "GitHubCopilotChat/0.22.0",
+                    },
+                    timeout=10,
+                )
                 token_info = resp.json()
             except Exception:
                 self.send_response(200)
@@ -649,8 +713,14 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             if "access_token" in token_info:
                 oauth_token = token_info["access_token"]
                 try:
-                    u_resp = requests.get("https://api.github.com/user", 
-                                          headers={"Authorization": f"token {oauth_token}", "User-Agent": "GitHubCopilotChat/0.22.0"}, timeout=10)
+                    u_resp = requests.get(
+                        "https://api.github.com/user",
+                        headers={
+                            "Authorization": f"token {oauth_token}",
+                            "User-Agent": "GitHubCopilotChat/0.22.0",
+                        },
+                        timeout=10,
+                    )
                     username = u_resp.json().get("login", "unknown")
 
                     copilot_data = fetch_copilot_token(oauth_token)
@@ -661,7 +731,7 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                         "api_key": api_key,
                         "github_token": oauth_token,
                         "copilot_token": copilot_data["token"],
-                        "expires_at": copilot_data["expires_at"]
+                        "expires_at": copilot_data["expires_at"],
                     }
                     save_user_session(username, session_data)
                     USER_SESSIONS[api_key] = session_data
@@ -671,9 +741,20 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
 
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
-                    self.send_header("Set-Cookie", f"kagent_session={sid}; Path=/; Domain=.kagent.local; Max-Age=2592000; SameSite=Lax")
+                    self.send_header(
+                        "Set-Cookie",
+                        f"kagent_session={sid}; Path=/; Domain=.kagent.local; Max-Age=2592000; SameSite=Lax",
+                    )
                     self.end_headers()
-                    self.wfile.write(json.dumps({"status": "success", "username": username, "api_key": api_key}).encode())
+                    self.wfile.write(
+                        json.dumps(
+                            {
+                                "status": "success",
+                                "username": username,
+                                "api_key": api_key,
+                            }
+                        ).encode()
+                    )
                 except Exception as ex:
                     print(f"[Auth Error] {ex}", flush=True)
                     self.send_response(200)
@@ -686,7 +767,17 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"status": "slow_down" if err == "slow_down" else "pending", "error": err, "interval": penalty}).encode())
+                self.wfile.write(
+                    json.dumps(
+                        {
+                            "status": "slow_down"
+                            if err == "slow_down"
+                            else "pending",
+                            "error": err,
+                            "interval": penalty,
+                        }
+                    ).encode()
+                )
 
         elif url.path == "/healthz":
             self.send_response(200)
@@ -704,8 +795,11 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             resp = requests.post(
                 "https://github.com/login/device/code",
                 json={"client_id": COPILOT_CLIENT_ID, "scope": "read:user"},
-                headers={"Accept": "application/json", "User-Agent": "GitHubCopilotChat/0.22.0"},
-                timeout=10
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "GitHubCopilotChat/0.22.0",
+                },
+                timeout=10,
             )
             data = resp.json()
             self.send_response(200)
@@ -718,15 +812,18 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             if sid in SESSION_COOKIES:
                 del SESSION_COOKIES[sid]
             self.send_response(200)
-            self.send_header("Set-Cookie", "kagent_session=; Path=/; Domain=.kagent.local; Max-Age=0")
+            self.send_header(
+                "Set-Cookie",
+                "kagent_session=; Path=/; Domain=.kagent.local; Max-Age=0",
+            )
             self.end_headers()
             self.wfile.write(b"OK")
 
         elif self.path.startswith("/v1/chat/completions"):
             auth_header = self.headers.get("Authorization", "")
             token = auth_header.replace("Bearer ", "").strip()
-            
-            # 1. Cookie üzerinden aktif kullanıcıyı tespit et
+
+            # 1. Aktif kullanıcıyı tespit et
             cookie_id = self.get_cookie("kagent_session")
             user_from_cookie = SESSION_COOKIES.get(cookie_id)
             user_from_header = self.headers.get("X-Auth-User")
@@ -734,11 +831,13 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             target_user = user_from_cookie or user_from_header
 
             session = None
-            if target_user and os.path.exists(os.path.join(SHM_DIR, f"{target_user}.json")):
+            if target_user and os.path.exists(
+                os.path.join(SHM_DIR, f"{target_user}.json")
+            ):
                 with open(os.path.join(SHM_DIR, f"{target_user}.json")) as f:
                     session = json.load(f)
 
-            # 2. If no cookie/header, check direct token match
+            # 2. Token eşleşmesi kontrolü
             if not session:
                 session = USER_SESSIONS.get(token)
 
@@ -752,14 +851,14 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                                 USER_SESSIONS[token] = session
                                 break
 
-            # 3. Katı İzolasyon: Asla başka kullanıcının tokenine fallback yapılmaz. 
-            # Eşleşen geçerli oturum yoksa istek kesinlikle reddedilir.
-            
+            # 3. İzolasyon kontrolü
             if not session:
                 self.send_response(401)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": "Gecersiz Kagent API Key"}).encode())
+                self.wfile.write(
+                    json.dumps({"error": "Gecersiz Kagent API Key"}).encode()
+                )
                 return
 
             length = int(self.headers.get("Content-Length", 0))
@@ -771,15 +870,23 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                 "Content-Type": "application/json",
                 "User-Agent": COPILOT_HEADERS["User-Agent"],
                 "Editor-Version": COPILOT_HEADERS["Editor-Version"],
-                "Editor-Plugin-Version": COPILOT_HEADERS["Editor-Plugin-Version"],
-                "Openai-Intent": "conversation-panel"
+                "Editor-Plugin-Version": COPILOT_HEADERS[
+                    "Editor-Plugin-Version"
+                ],
+                "Openai-Intent": "conversation-panel",
             }
 
             try:
-                with requests.post(upstream_url, data=body, headers=headers, stream=True) as resp:
+                with requests.post(
+                    upstream_url, data=body, headers=headers, stream=True
+                ) as resp:
                     self.send_response(resp.status_code)
                     for k, v in resp.headers.items():
-                        if k.lower() not in ["content-length", "transfer-encoding", "content-encoding"]:
+                        if k.lower() not in [
+                            "content-length",
+                            "transfer-encoding",
+                            "content-encoding",
+                        ]:
                             self.send_header(k, v)
                     self.end_headers()
                     for chunk in resp.iter_content(chunk_size=1024):
@@ -789,6 +896,7 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                 self.send_response(502)
                 self.end_headers()
                 self.wfile.write(str(e).encode())
+
 
 if __name__ == "__main__":
     server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), MultiTenantHandler)
