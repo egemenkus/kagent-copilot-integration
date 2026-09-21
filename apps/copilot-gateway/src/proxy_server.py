@@ -142,7 +142,8 @@ def background_rotator():
     while True:
         try:
             for user_file in os.listdir(SHM_DIR):
-                if not user_file.endswith(".json"): continue
+                if not user_file.endswith(".json"):
+                    continue
                 filepath = os.path.join(SHM_DIR, user_file)
                 with open(filepath) as f:
                     data = json.load(f)
@@ -165,7 +166,7 @@ PORTAL_HTML = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kagent • Copilot AI Gateway</title>
+    <title>Kagent • Copilot Auth Portal</title>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -382,13 +383,10 @@ PORTAL_HTML = """<!DOCTYPE html>
                 <div class="detail-value" id="modelDisplay">copilot-...</div>
             </div>
 
-            <p style="font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-top: 14px;">
-                🚀 <strong>Kagent UI</strong> üzerinde <code id="modelInline" style="color:#60a5fa;">copilot-...</code> modelinizi seçip ajanlarınızı kesintisiz çalıştırabilirsiniz.
-            </p>
-
             <a id="btnGoChat" class="btn" href="http://chat.kagent.local" style="margin-top:16px; background:#10b981; color:#fff; display:none;">
-                Kagent Chat'e Git (2sn içinde yönlendiriliyor...) ↗
+                Kagent Chat'e Git ↗
             </a>
+
             <button class="btn-logout" onclick="logout()">Oturumu Sonlandır</button>
         </div>
     </div>
@@ -430,13 +428,11 @@ PORTAL_HTML = """<!DOCTYPE html>
             const modelName = 'copilot-' + username.toLowerCase();
             document.getElementById('userDisplay').innerText = '@' + username;
             document.getElementById('modelDisplay').innerText = modelName;
-            document.getElementById('modelInline').innerText = modelName;
 
-            // Chat UI'a git butonu veya otomatik yönlendirme
             const btnGo = document.getElementById('btnGoChat');
             if (btnGo) {
                 btnGo.style.display = 'inline-flex';
-                setTimeout(() => { window.location.href = "http://chat.kagent.local"\; }, 2000);
+                setTimeout(() => { window.location.href = "http://chat.kagent.local"; }, 2000);
             }
         }
 
@@ -504,6 +500,9 @@ PORTAL_HTML = """<!DOCTYPE html>
 """
 
 class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.do_GET()
+
     def get_cookie(self, name):
         if "Cookie" in self.headers:
             cookie = http.cookies.SimpleCookie(self.headers["Cookie"])
@@ -511,27 +510,30 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                 return cookie[name].value
         return None
 
-    def do_HEAD(self):
-        self.do_GET()
-
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
-        
-        if url.path == "/api/auth/verify":
-            cookie_id = self.get_cookie("kagent_session")
-            username = SESSION_COOKIES.get(cookie_id)
-            if not username:
-                qs = urllib.parse.parse_qs(url.query)
-                req_u = qs.get("username", [None])[0]
-                if req_u and os.path.exists(os.path.join(SHM_DIR, f"{req_u}.json")):
-                    username = req_u
 
-            if username and os.path.exists(os.path.join(SHM_DIR, f"{username}.json")):
-                self.send_response(200)
-                self.send_header("X-Auth-User", username)
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-            else:
+        if url.path == "/api/auth/verify":
+            try:
+                cookie_id = self.get_cookie("kagent_session")
+                username = SESSION_COOKIES.get(cookie_id)
+                if not username:
+                    qs = urllib.parse.parse_qs(url.query)
+                    req_u = qs.get("username", [None])[0]
+                    if req_u and os.path.exists(os.path.join(SHM_DIR, f"{req_u}.json")):
+                        username = req_u
+
+                if username and os.path.exists(os.path.join(SHM_DIR, f"{username}.json")):
+                    self.send_response(200)
+                    self.send_header("X-Auth-User", username)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    self.send_response(401)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+            except Exception as e:
+                print(f"[Verify Error] {e}", flush=True)
                 self.send_response(401)
                 self.send_header("Content-Length", "0")
                 self.end_headers()
@@ -542,17 +544,6 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(PORTAL_HTML.encode("utf-8"))
-
-                elif url.path == "/api/auth/verify":
-            cookie_id = self.get_cookie("kagent_session")
-            username = SESSION_COOKIES.get(cookie_id)
-            if username and os.path.exists(os.path.join(SHM_DIR, f"{username}.json")):
-                self.send_response(200)
-                self.send_header("X-Auth-User", username)
-                self.end_headers()
-            else:
-                self.send_response(401)
-                self.end_headers()
 
         elif url.path == "/api/auth/me":
             cookie_id = self.get_cookie("kagent_session")
@@ -579,7 +570,9 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(url.query)
             device_code = qs.get("device_code", [None])[0]
             if not device_code:
-                self.send_response(400); self.end_headers(); return
+                self.send_response(400)
+                self.end_headers()
+                return
 
             token_url = "https://github.com/login/oauth/access_token"
             data = {
@@ -590,9 +583,12 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             try:
                 resp = requests.post(token_url, json=data, headers={"Accept": "application/json", "User-Agent": "GitHubCopilotChat/0.22.0"}, timeout=10)
                 token_info = resp.json()
-            except Exception as pe:
-                self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
-                self.wfile.write(json.dumps({"status": "pending"}).encode()); return
+            except Exception:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "pending"}).encode())
+                return
 
             if "access_token" in token_info:
                 oauth_token = token_info["access_token"]
@@ -624,12 +620,16 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({"status": "success", "username": username, "api_key": api_key}).encode())
                 except Exception as ex:
                     print(f"[Auth Error] {ex}", flush=True)
-                    self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
                     self.wfile.write(json.dumps({"status": "pending"}).encode())
             else:
                 err = token_info.get("error", "authorization_pending")
                 penalty = token_info.get("interval", 35)
-                self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
                 self.wfile.write(json.dumps({"status": "slow_down" if err == "slow_down" else "pending", "error": err, "interval": penalty}).encode())
 
         elif url.path == "/healthz":
@@ -638,7 +638,8 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"OK")
         else:
-            self.send_response(404); self.end_headers()
+            self.send_response(404)
+            self.end_headers()
 
     def do_POST(self):
         url = urllib.parse.urlparse(self.path)
