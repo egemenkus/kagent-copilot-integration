@@ -4,3 +4,5 @@
 .DS_Store
 *.zip
 apps/copilot-gateway/k8s/*secret*.yaml
+__pycache__/
+*.py[cod]
