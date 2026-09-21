@@ -7,7 +7,7 @@ metadata:
     ingress.class: nginx
 spec:
   rules:
-  - host: copilot.kagent.local
+  - host: login.kagent.local
     http:
       paths:
       - path: /
@@ -15,5 +15,28 @@ spec:
         backend:
           service:
             name: copilot-gateway-svc
+            port:
+              number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kagent-chat-ingress
+  namespace: kagent
+  annotations:
+    ingress.class: nginx
+    nginx.ingress.kubernetes.io/auth-url: "http://copilot-gateway-svc.kagent.svc.cluster.local:8080/api/auth/verify"
+    nginx.ingress.kubernetes.io/auth-signin: "http://login.kagent.local"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-User"
+spec:
+  rules:
+  - host: chat.kagent.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: kagent-ui
             port:
               number: 8080
