@@ -3,3 +3,4 @@
 *.env
 .DS_Store
 *.zip
+apps/copilot-gateway/k8s/*secret*.yaml
