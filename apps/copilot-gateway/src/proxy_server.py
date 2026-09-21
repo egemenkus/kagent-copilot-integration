@@ -74,25 +74,7 @@ def provision_user_k8s_resources(username, api_key, session_data):
     }
     apply_k8s_resource("https://kubernetes.default.svc/api/v1/namespaces/kagent/secrets", key_manifest, ca_path, k8s_token)
 
-    modelconfig_name = f"copilot-{uname_lower}"
-    modelconfig_manifest = {
-        "apiVersion": "kagent.dev/v1alpha2",
-        "kind": "ModelConfig",
-        "metadata": {
-            "name": modelconfig_name,
-            "namespace": "kagent"
-        },
-        "spec": {
-            "provider": "OpenAI",
-            "model": "gpt-4o",
-            "apiKeySecret": kagent_sec_name,
-            "apiKeySecretKey": "api-key",
-            "openAI": {
-                "baseUrl": "http://copilot-gateway-svc.kagent.svc.cluster.local:8080/v1"
-            }
-        }
-    }
-    apply_k8s_resource("https://kubernetes.default.svc/apis/kagent.dev/v1alpha2/namespaces/kagent/modelconfigs", modelconfig_manifest, ca_path, k8s_token)
+    # Multi-tenant yapıda tek bir paylaşımlı ModelConfig kullanılır, kişisel CRD üretilmez.
     print(f"[Provision] {username} ModelConfig & Secret basariyla senkronize edildi.", flush=True)
 
 def save_user_session(username, data):
@@ -425,7 +407,7 @@ PORTAL_HTML = """<!DOCTYPE html>
             document.getElementById('codeBox').style.display = 'none';
             document.getElementById('activeSessionBox').style.display = 'block';
 
-            const modelName = 'copilot-' + username.toLowerCase();
+            const modelName = 'copilot-gateway';
             document.getElementById('userDisplay').innerText = '@' + username;
             document.getElementById('modelDisplay').innerText = modelName;
 
@@ -670,7 +652,21 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             auth_header = self.headers.get("Authorization", "")
             token = auth_header.replace("Bearer ", "").strip()
             
-            session = USER_SESSIONS.get(token)
+            # 1. Cookie üzerinden aktif kullanıcıyı tespit et
+            cookie_id = self.get_cookie("kagent_session")
+            user_from_cookie = SESSION_COOKIES.get(cookie_id)
+            user_from_header = self.headers.get("X-Auth-User")
+
+            target_user = user_from_cookie or user_from_header
+
+            session = None
+            if target_user and os.path.exists(os.path.join(SHM_DIR, f"{target_user}.json")):
+                with open(os.path.join(SHM_DIR, f"{target_user}.json")) as f:
+                    session = json.load(f)
+
+            # 2. Eğer Cookie/Header yoksa (doğrudan API çağrısı ise) token ile ara
+            if not session:
+                session = USER_SESSIONS.get(token)
             if not session:
                 for f in os.listdir(SHM_DIR):
                     if f.endswith(".json"):
