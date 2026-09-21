@@ -16,9 +16,7 @@ spec:
   provider: OpenAI
   baseUrl: http://copilot-gateway-svc.kagent.svc.cluster.local:8080/v1
   model: "gpt-4o"
-  apiKeySecret:
-    name: kagent-internal-auth
-    key: api-key
+  apiKeySecret: kagent-internal-auth
 ---
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
