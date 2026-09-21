@@ -6,6 +6,7 @@ import urllib.parse
 import threading
 import secrets
 import base64
+import http.cookies
 import requests
 
 PORT = int(os.environ.get("PORT", 8080))
@@ -13,6 +14,7 @@ SHM_DIR = "/dev/shm/users"
 os.makedirs(SHM_DIR, exist_ok=True)
 
 USER_SESSIONS = {}
+SESSION_COOKIES = {}
 
 COPILOT_CLIENT_ID = "01ab8ac9400c4e429b23"
 
@@ -34,20 +36,21 @@ def get_k8s_context():
 
 def apply_k8s_resource(url, manifest, ca_path, k8s_token):
     headers = {"Authorization": f"Bearer {k8s_token}", "Content-Type": "application/json"}
-    resp = requests.post(url, json=manifest, headers=headers, verify=ca_path, timeout=5)
-    if resp.status_code == 409:
-        name = manifest["metadata"]["name"]
-        requests.put(f"{url}/{name}", json=manifest, headers=headers, verify=ca_path, timeout=5)
+    try:
+        resp = requests.post(url, json=manifest, headers=headers, verify=ca_path, timeout=5)
+        if resp.status_code == 409:
+            name = manifest["metadata"]["name"]
+            requests.put(f"{url}/{name}", json=manifest, headers=headers, verify=ca_path, timeout=5)
+    except Exception as e:
+        print(f"[K8s Apply Error] {manifest.get('kind')}: {e}", flush=True)
 
 def provision_user_k8s_resources(username, api_key, session_data):
     k8s_token, ca_path = get_k8s_context()
     if not k8s_token:
-        print("[Provision] In-cluster K8s ServiceAccount bulunamadi.", flush=True)
         return
 
     uname_lower = username.lower()
 
-    # 1. Dahili Oturum Secret'ı (Gateway Pod'u restart olursa kurtarmak için)
     sec_name = f"copilot-user-{uname_lower}"
     raw_payload = json.dumps(session_data).encode("utf-8")
     b64_payload = base64.b64encode(raw_payload).decode("utf-8")
@@ -60,7 +63,6 @@ def provision_user_k8s_resources(username, api_key, session_data):
     }
     apply_k8s_resource("https://kubernetes.default.svc/api/v1/namespaces/kagent/secrets", session_manifest, ca_path, k8s_token)
 
-    # 2. Kagent API Key Secret'ı (ModelConfig'in okuyacağı secret)
     kagent_sec_name = f"kagent-user-{uname_lower}"
     b64_key = base64.b64encode(api_key.encode("utf-8")).decode("utf-8")
     key_manifest = {
@@ -72,7 +74,6 @@ def provision_user_k8s_resources(username, api_key, session_data):
     }
     apply_k8s_resource("https://kubernetes.default.svc/api/v1/namespaces/kagent/secrets", key_manifest, ca_path, k8s_token)
 
-    # 3. Kagent ModelConfig CRD (Otomatik Provisioning!)
     modelconfig_name = f"copilot-{uname_lower}"
     modelconfig_manifest = {
         "apiVersion": "kagent.dev/v1alpha2",
@@ -92,7 +93,7 @@ def provision_user_k8s_resources(username, api_key, session_data):
         }
     }
     apply_k8s_resource("https://kubernetes.default.svc/apis/kagent.dev/v1alpha2/namespaces/kagent/modelconfigs", modelconfig_manifest, ca_path, k8s_token)
-    print(f"[Provision] {username} icin ModelConfig ve Secret basariyla otomatik olusturuldu.", flush=True)
+    print(f"[Provision] {username} ModelConfig & Secret basariyla senkronize edildi.", flush=True)
 
 def save_user_session(username, data):
     user_file = os.path.join(SHM_DIR, f"{username}.json")
@@ -101,7 +102,34 @@ def save_user_session(username, data):
         json.dump(data, f)
     os.replace(tmp_file, user_file)
 
-    provision_user_k8s_resources(username, data["api_key"], data)
+    threading.Thread(target=provision_user_k8s_resources, args=(username, data["api_key"], data), daemon=True).start()
+
+def load_sessions_from_k8s():
+    k8s_token, ca_path = get_k8s_context()
+    if not k8s_token:
+        return
+    url = "https://kubernetes.default.svc/api/v1/namespaces/kagent/secrets"
+    headers = {"Authorization": f"Bearer {k8s_token}"}
+    try:
+        resp = requests.get(url, headers=headers, verify=ca_path, timeout=5)
+        if resp.status_code == 200:
+            for item in resp.json().get("items", []):
+                name = item["metadata"]["name"]
+                if name.startswith("copilot-user-"):
+                    b64_data = item.get("data", {}).get("session")
+                    if b64_data:
+                        raw = base64.b64decode(b64_data).decode("utf-8")
+                        sess = json.loads(raw)
+                        uname = sess["username"]
+                        save_file = os.path.join(SHM_DIR, f"{uname}.json")
+                        with open(save_file, "w") as sf:
+                            json.dump(sess, sf)
+                        USER_SESSIONS[sess["api_key"]] = sess
+                        print(f"[Init Bootstrap] {uname} oturumu Secret'tan RAM'e aktarildi.", flush=True)
+    except Exception as e:
+        print(f"[Init Warning] Oturumlar yuklenemedi: {e}", flush=True)
+
+load_sessions_from_k8s()
 
 def fetch_copilot_token(github_token):
     headers = dict(COPILOT_HEADERS)
@@ -131,35 +159,8 @@ def background_rotator():
         time.sleep(60)
 
 threading.Thread(target=background_rotator, daemon=True).start()
-def load_sessions_from_k8s():
-    k8s_token, ca_path = get_k8s_context()
-    if not k8s_token:
-        return
-    url = "https://kubernetes.default.svc/api/v1/namespaces/kagent/secrets"
-    headers = {"Authorization": f"Bearer {k8s_token}"}
-    try:
-        resp = requests.get(url, headers=headers, verify=ca_path, timeout=5)
-        if resp.status_code == 200:
-            for item in resp.json().get("items", []):
-                name = item["metadata"]["name"]
-                if name.startswith("copilot-user-"):
-                    b64_data = item.get("data", {}).get("session")
-                    if b64_data:
-                        raw = base64.b64decode(b64_data).decode("utf-8")
-                        sess = json.loads(raw)
-                        uname = sess["username"]
-                        save_file = os.path.join(SHM_DIR, f"{uname}.json")
-                        with open(save_file, "w") as sf:
-                            json.dump(sess, sf)
-                        USER_SESSIONS[sess["api_key"]] = sess
-                        print(f"[Init] {uname} oturumu Secret'tan RAM'e yuklendi.", flush=True)
-    except Exception as e:
-        print(f"[Init Warning] Oturumlar yuklenemedi: {e}", flush=True)
 
-load_sessions_from_k8s()
-
-
-INDEX_HTML = """<!DOCTYPE html>
+PORTAL_HTML = """<!DOCTYPE html>
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
@@ -174,7 +175,9 @@ INDEX_HTML = """<!DOCTYPE html>
             --text-primary: #f9fafb;
             --text-secondary: #9ca3af;
             --accent: #2563eb;
+            --accent-hover: #1d4ed8;
             --success: #10b981;
+            --danger: #ef4444;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -267,7 +270,7 @@ INDEX_HTML = """<!DOCTYPE html>
             animation: spin 1s ease-in-out infinite;
         }
         @keyframes spin { to { transform: rotate(360deg); } }
-        .success-box { display: none; text-align: left; margin-top: 24px; }
+        .status-box { display: none; text-align: left; }
         .status-badge {
             background: rgba(16, 185, 129, 0.1);
             border: 1px solid rgba(16, 185, 129, 0.3);
@@ -301,6 +304,27 @@ INDEX_HTML = """<!DOCTYPE html>
             color: #60a5fa;
             word-break: break-all;
         }
+        .btn-logout {
+            margin-top: 16px;
+            background: transparent;
+            border: 1px solid #374151;
+            color: #9ca3af;
+            padding: 10px;
+            font-size: 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            width: 100%;
+            transition: all 0.2s;
+        }
+        .btn-logout:hover {
+            border-color: var(--danger);
+            color: var(--danger);
+        }
+        #loadingState {
+            padding: 40px 0;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
     </style>
 </head>
 <body>
@@ -310,7 +334,11 @@ INDEX_HTML = """<!DOCTYPE html>
             Kagent • Copilot Auth Portal
         </div>
 
-        <div id="initialStep">
+        <div id="loadingState">
+            <span class="spinner"></span> Oturum kontrol ediliyor...
+        </div>
+
+        <div id="initialStep" style="display:none;">
             <h1>Kurumsal Copilot Girişi</h1>
             <p class="subtitle">Kubernetes ajanlarınızı çalıştırmak için tek tıkla GitHub hesabınızı bağlayın.</p>
             <button class="btn" onclick="startAuth()">
@@ -322,11 +350,11 @@ INDEX_HTML = """<!DOCTYPE html>
         </div>
 
         <div class="code-box" id="codeBox">
-            <p style="font-size: 13px; color: var(--text-secondary);">1. Aşağıdaki tek kullanımlık onay kodunu kopyalayın:</p>
+            <p style="font-size: 13px; color: var(--text-secondary);">1. Tek kullanımlık onay kodunuz:</p>
             <div class="user-code" id="userCode" onclick="copyCode()" title="Tıkla ve Kopyala">----</div>
             <p style="font-size: 11px; color: #60a5fa; text-align: center; margin-bottom: 16px;">(Koda tıklayarak kopyalayabilirsiniz)</p>
             
-            <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">2. GitHub onay sayfasında kodu yapıştırın:</p>
+            <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 10px;">2. GitHub onay sayfasına gidip kodu yapıştırın:</p>
             <a class="btn" id="verifyBtn" href="#" target="_blank" style="background:#2563eb; color:#fff;">
                 GitHub'da Onayla ↗
             </a>
@@ -336,33 +364,71 @@ INDEX_HTML = """<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- YENİ: SIFIR KOMUT, TAM OTOMATİK BAŞARI EKRANI -->
-        <div class="success-box" id="successBox">
+        <div class="status-box" id="activeSessionBox">
             <div class="status-badge">
                 <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
                     <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
                 </svg>
-                <span><strong>ModelConfig Cluster'a Tanımlandı!</strong><br><small style="color:#a7f3d0;">Herhangi bir komut çalıştırmanıza gerek yoktur.</small></span>
+                <span><strong>Oturum Aktif & Model Tanımlı</strong><br><small style="color:#a7f3d0;">Token arka planda otomatik yenileniyor.</small></span>
             </div>
 
             <div class="detail-item">
-                <div class="detail-title">Kullanıcı Hesabı</div>
+                <div class="detail-title">GitHub Hesabı</div>
                 <div class="detail-value" id="userDisplay">@...</div>
             </div>
 
             <div class="detail-item">
-                <div class="detail-title">Cluster Üzerindeki Model Adınız</div>
+                <div class="detail-title">Kagent Model Adınız</div>
                 <div class="detail-value" id="modelDisplay">copilot-...</div>
             </div>
 
             <p style="font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-top: 14px;">
-                🚀 <strong>Kagent UI</strong> sayfasına dönüp ajanınızın model ayarlarından <code id="modelInline" style="color:#60a5fa;">copilot-...</code> modelini seçerek hemen çalıştırabilirsiniz.
+                🚀 <strong>Kagent UI</strong> üzerinde <code id="modelInline" style="color:#60a5fa;">copilot-...</code> modelinizi seçip ajanlarınızı kesintisiz çalıştırabilirsiniz.
             </p>
+
+            <button class="btn-logout" onclick="logout()">Oturumu Sonlandır</button>
         </div>
     </div>
 
     <script>
         let pollTimer = null;
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const queryUser = urlParams.get('username');
+            if (queryUser) {
+                localStorage.setItem('kagent_user', queryUser);
+            }
+
+            const savedUser = localStorage.getItem('kagent_user');
+            try {
+                const res = await fetch('/api/auth/me' + (savedUser ? '?username=' + savedUser : ''));
+                const data = await res.json();
+                document.getElementById('loadingState').style.display = 'none';
+
+                if (data.authenticated) {
+                    showActiveDashboard(data.username);
+                } else {
+                    document.getElementById('initialStep').style.display = 'block';
+                }
+            } catch (e) {
+                document.getElementById('loadingState').style.display = 'none';
+                document.getElementById('initialStep').style.display = 'block';
+            }
+        });
+
+        function showActiveDashboard(username) {
+            localStorage.setItem('kagent_user', username);
+            document.getElementById('loadingState').style.display = 'none';
+            document.getElementById('initialStep').style.display = 'none';
+            document.getElementById('codeBox').style.display = 'none';
+            document.getElementById('activeSessionBox').style.display = 'block';
+
+            const modelName = 'copilot-' + username.toLowerCase();
+            document.getElementById('userDisplay').innerText = '@' + username;
+            document.getElementById('modelDisplay').innerText = modelName;
+            document.getElementById('modelInline').innerText = modelName;
+        }
 
         async function startAuth() {
             const btn = document.querySelector('#initialStep button');
@@ -379,8 +445,7 @@ INDEX_HTML = """<!DOCTYPE html>
                 document.getElementById('verifyBtn').href = data.verification_uri;
 
                 window.open(data.verification_uri, '_blank');
-
-                pollStatus(data.device_code, data.interval || 5);
+                pollStatus(data.device_code, Math.max(data.interval || 5, 5));
             } catch (e) {
                 alert('Giriş oturumu başlatılamadı: ' + e);
                 btn.disabled = false;
@@ -397,25 +462,31 @@ INDEX_HTML = """<!DOCTYPE html>
             setTimeout(() => { uc.innerText = orig; }, 1200);
         }
 
-        function pollStatus(deviceCode, interval) {
+        function pollStatus(deviceCode, currentInterval) {
+            let interval = currentInterval;
             pollTimer = setInterval(async () => {
                 try {
-                    const res = await fetch(`/api/auth/poll?device_code=${deviceCode}`);
+                    const res = await fetch('/api/auth/poll?device_code=' + deviceCode);
                     const data = await res.json();
+
                     if (data.status === 'success') {
                         clearInterval(pollTimer);
-                        document.getElementById('codeBox').style.display = 'none';
-                        document.getElementById('successBox').style.display = 'block';
-                        
-                        const modelName = `copilot-${data.username.toLowerCase()}`;
-                        document.getElementById('userDisplay').innerText = `@${data.username}`;
-                        document.getElementById('modelDisplay').innerText = modelName;
-                        document.getElementById('modelInline').innerText = modelName;
-                    } else if (data.status === 'error') {
-                        document.getElementById('statusText').innerText = 'Hata: ' + data.error;
+                        showActiveDashboard(data.username);
+                    } else if (data.status === 'slow_down') {
+                        clearInterval(pollTimer);
+                        const nextInterval = data.interval || (interval + 10);
+                        document.getElementById('statusText').innerHTML = '<span class="spinner"></span> GitHub rate-limit koruması devrede, ' + nextInterval + 'sn bekleniyor...';
+                        setTimeout(() => pollStatus(deviceCode, nextInterval), nextInterval * 1000);
                     }
                 } catch (e) {}
-            }, Math.max(interval, 4) * 1000);
+            }, interval * 1000);
+        }
+
+        async function logout() {
+            if (!confirm('Oturumu kapatmak istediğinize emin misiniz?')) return;
+            localStorage.removeItem('kagent_user');
+            await fetch('/api/auth/logout', { method: 'POST' });
+            location.reload();
         }
     </script>
 </body>
@@ -423,13 +494,42 @@ INDEX_HTML = """<!DOCTYPE html>
 """
 
 class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
+    def get_cookie(self, name):
+        if "Cookie" in self.headers:
+            cookie = http.cookies.SimpleCookie(self.headers["Cookie"])
+            if name in cookie:
+                return cookie[name].value
+        return None
+
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
+        
         if url.path == "/" or url.path == "/login":
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(INDEX_HTML.encode("utf-8"))
+            self.wfile.write(PORTAL_HTML.encode("utf-8"))
+
+        elif url.path == "/api/auth/me":
+            cookie_id = self.get_cookie("kagent_session")
+            username = SESSION_COOKIES.get(cookie_id)
+
+            if not username:
+                qs = urllib.parse.parse_qs(url.query)
+                req_user = qs.get("username", [None])[0]
+                if req_user and os.path.exists(os.path.join(SHM_DIR, f"{req_user}.json")):
+                    username = req_user
+
+            if username and os.path.exists(os.path.join(SHM_DIR, f"{username}.json")):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"authenticated": True, "username": username}).encode())
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"authenticated": False}).encode())
 
         elif url.path == "/api/auth/poll":
             qs = urllib.parse.parse_qs(url.query)
@@ -444,21 +544,17 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
             }
             try:
-                resp = requests.post(token_url, json=data, headers={"Accept": "application/json", "User-Agent": "KagentGateway/1.0"}, timeout=10)
+                resp = requests.post(token_url, json=data, headers={"Accept": "application/json", "User-Agent": "GitHubCopilotChat/0.22.0"}, timeout=10)
                 token_info = resp.json()
             except Exception as pe:
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"status": "pending", "debug": str(pe)}).encode())
-                return
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                self.wfile.write(json.dumps({"status": "pending"}).encode()); return
 
             if "access_token" in token_info:
                 oauth_token = token_info["access_token"]
-                
                 try:
                     u_resp = requests.get("https://api.github.com/user", 
-                                          headers={"Authorization": f"token {oauth_token}", "User-Agent": "KagentGateway/1.0"}, timeout=10)
+                                          headers={"Authorization": f"token {oauth_token}", "User-Agent": "GitHubCopilotChat/0.22.0"}, timeout=10)
                     username = u_resp.json().get("login", "unknown")
 
                     copilot_data = fetch_copilot_token(oauth_token)
@@ -474,24 +570,23 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                     save_user_session(username, session_data)
                     USER_SESSIONS[api_key] = session_data
 
-                    print(f"[Auth Success & Auto-Provisioned] Kullanici: {username}", flush=True)
+                    sid = secrets.token_hex(24)
+                    SESSION_COOKIES[sid] = username
 
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
+                    self.send_header("Set-Cookie", f"kagent_session={sid}; Path=/; Max-Age=2592000; SameSite=Lax")
                     self.end_headers()
                     self.wfile.write(json.dumps({"status": "success", "username": username, "api_key": api_key}).encode())
                 except Exception as ex:
-                    print(f"[Auth Exchange Error] {ex}", flush=True)
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"status": "error", "error": str(ex)}).encode())
+                    print(f"[Auth Error] {ex}", flush=True)
+                    self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                    self.wfile.write(json.dumps({"status": "pending"}).encode())
             else:
                 err = token_info.get("error", "authorization_pending")
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({"status": "pending", "error": err}).encode())
+                penalty = token_info.get("interval", 35)
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                self.wfile.write(json.dumps({"status": "slow_down" if err == "slow_down" else "pending", "error": err, "interval": penalty}).encode())
 
         elif url.path == "/healthz":
             self.send_response(200)
@@ -508,7 +603,7 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             resp = requests.post(
                 "https://github.com/login/device/code",
                 json={"client_id": COPILOT_CLIENT_ID, "scope": "read:user"},
-                headers={"Accept": "application/json", "User-Agent": "KagentGateway/1.0"},
+                headers={"Accept": "application/json", "User-Agent": "GitHubCopilotChat/0.22.0"},
                 timeout=10
             )
             data = resp.json()
@@ -516,6 +611,15 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(data).encode())
+
+        elif url.path == "/api/auth/logout":
+            sid = self.get_cookie("kagent_session")
+            if sid in SESSION_COOKIES:
+                del SESSION_COOKIES[sid]
+            self.send_response(200)
+            self.send_header("Set-Cookie", "kagent_session=; Path=/; Max-Age=0")
+            self.end_headers()
+            self.wfile.write(b"OK")
 
         elif self.path.startswith("/v1/chat/completions"):
             auth_header = self.headers.get("Authorization", "")
