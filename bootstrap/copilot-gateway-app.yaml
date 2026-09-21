@@ -8,7 +8,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: 'https://github.com/REPO_OWNER/REPO_NAME.git'
+    repoURL: 'https://github.com/egemenkus/kagent-copilot-integration.git'
     targetRevision: HEAD
     path: apps/copilot-gateway/k8s
   destination:
