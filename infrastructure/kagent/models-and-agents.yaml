@@ -17,6 +17,7 @@ spec:
   baseUrl: http://copilot-gateway-svc.kagent.svc.cluster.local:8080/v1
   model: "gpt-4o"
   apiKeySecret: kagent-internal-auth
+  apiKeySecretKey: api-key
 ---
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
