@@ -10,7 +10,7 @@ spec:
   source:
     repoURL: 'https://github.com/egemenkus/kagent-copilot-integration.git'
     targetRevision: HEAD
-    path: apps/copilot-gateway/k8s
+    path: apps/copilot-gateway
   destination:
     server: 'https://kubernetes.default.svc'
     namespace: kagent
