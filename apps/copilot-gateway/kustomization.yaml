@@ -3,12 +3,14 @@ kind: Kustomization
 namespace: kagent
 
 resources:
-- k8s/rbac.yaml
-- k8s/service.yaml
 - k8s/deployment.yaml
+- k8s/service.yaml
+- k8s/rbac.yaml
+- k8s/oauth-secret.yaml
 
 configMapGenerator:
-- name: copilot-gateway-scripts
+- name: copilot-gateway-source
   files:
-  - src/auth_rotator.py
   - src/proxy_server.py
+generatorOptions:
+  disableNameSuffixHash: true

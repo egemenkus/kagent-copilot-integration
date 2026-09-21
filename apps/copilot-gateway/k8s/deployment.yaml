@@ -17,55 +17,51 @@ spec:
       labels:
         app.kubernetes.io/name: copilot-gateway
     spec:
-      serviceAccountName: copilot-rotator-sa
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 10001
-        runAsGroup: 10001
-        fsGroup: 10001
-        seccompProfile:
-          type: RuntimeDefault
+      serviceAccountName: copilot-gateway-sa
       volumes:
-      - name: shared-tokens
+      - name: app-source
+        configMap:
+          name: copilot-gateway-source
+      - name: shm-memory
         emptyDir:
           medium: Memory
-      - name: gateway-scripts
-        configMap:
-          name: copilot-gateway-scripts
-          defaultMode: 0555
       containers:
-      - name: auth-rotator
-        image: python:3.11-alpine
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop: ["ALL"]
-        volumeMounts:
-        - name: shared-tokens
-          mountPath: /dev/shm
-        - name: gateway-scripts
-          mountPath: /app
-        command: ["python3", "-u", "/app/auth_rotator.py"]
-
       - name: copilot-proxy
         image: python:3.11-alpine
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop: ["ALL"]
-        volumeMounts:
-        - name: shared-tokens
-          mountPath: /dev/shm
-          readOnly: true
-        - name: gateway-scripts
-          mountPath: /app
+        command: ["python3", "-u", "/app/proxy_server.py"]
+        env:
+        - name: PORT
+          value: "8080"
+        - name: REDIRECT_URI
+          value: "http://localhost:8080/auth/callback"
+        - name: GITHUB_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: copilot-oauth-credentials
+              key: client-id
+        - name: GITHUB_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: copilot-oauth-credentials
+              key: client-secret
         ports:
         - containerPort: 8080
           name: http
+        volumeMounts:
+        - name: app-source
+          mountPath: /app
+        - name: shm-memory
+          mountPath: /dev/shm
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 250m
+            memory: 128Mi
         readinessProbe:
           httpGet:
             path: /healthz
             port: 8080
           initialDelaySeconds: 2
-          periodSeconds: 3
-        command: ["python3", "-u", "/app/proxy_server.py"]
+          periodSeconds: 5
