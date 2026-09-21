@@ -6,6 +6,7 @@ namespace: kagent
 resources:
   - k8s/rbac.yaml
   - k8s/deployment.yaml
+  - k8s/ingress.yaml
 
 configMapGenerator:
   - name: copilot-gateway-source

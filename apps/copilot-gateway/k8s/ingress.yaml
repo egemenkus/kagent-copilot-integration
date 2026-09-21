@@ -1,0 +1,19 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: copilot-gateway-ingress
+  namespace: kagent
+  annotations:
+    ingress.class: nginx
+spec:
+  rules:
+  - host: copilot.kagent.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: copilot-gateway-svc
+            port:
+              number: 8080
