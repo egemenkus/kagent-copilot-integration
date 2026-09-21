@@ -1,3 +1,76 @@
+
+import subprocess
+
+def ensure_user_k8s_resources(username, api_key):
+    namespace = "kagent"
+    model_config_name = f"copilot-model-{username}"
+    agent_name = f"sre-assistant-{username}"
+    
+    # 1. ModelConfig Manifest
+    mc_yaml = f"""
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: {model_config_name}
+  namespace: {namespace}
+spec:
+  provider: openai
+  baseUrl: http://copilot-gateway-svc.kagent.svc.cluster.local:8080/v1
+  apiKeySecret:
+    name: user-token-{username}
+    key: api-key
+  model: gpt-4o
+"""
+    # 2. Secret Manifest (Kullanıcıya özel token)
+    secret_yaml = f"""
+apiVersion: v1
+kind: Secret
+metadata:
+  name: user-token-{username}
+  namespace: {namespace}
+type: Opaque
+stringData:
+  api-key: "{api_key}"
+"""
+    
+    # 3. Agent Manifest (Kullanıcıya özel izole SRE Assistant)
+    agent_yaml = f"""
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: {agent_name}
+  namespace: {namespace}
+spec:
+  type: Declarative
+  description: "Personal SRE Assistant for {username}"
+  declarative:
+    runtime: go
+    stream: true
+    modelConfig: {model_config_name}
+    systemMessage: "You are an expert SRE assistant dedicated to {username}. Use available tools safely."
+    tools:
+    - type: McpServer
+      mcpServer:
+        apiGroup: kagent.dev
+        kind: RemoteMCPServer
+        name: kagent-tool-server
+        namespace: {namespace}
+        toolNames:
+        - k8s_get_available_api_resources
+        - k8s_get_resources
+        - k8s_annotate_resource
+        - k8s_apply_manifest
+        - k8s_get_cluster_configuration
+"""
+    
+    # Kapply via kubectl stdin
+    for manifest in [secret_yaml, mc_yaml, agent_yaml]:
+        try:
+            p = subprocess.Popen(["kubectl", "apply", "-f", "-"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            p.communicate(input=manifest.encode())
+        except Exception as e:
+            print(f"Error applying resource for {username}: {e}")
+
 import http.server
 import json
 import os
