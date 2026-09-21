@@ -26,8 +26,12 @@ metadata:
   annotations:
     ingress.class: nginx
     nginx.ingress.kubernetes.io/auth-url: "http://copilot-gateway-svc.kagent.svc.cluster.local:8080/api/auth/verify"
-    nginx.ingress.kubernetes.io/auth-signin: "http://login.kagent.local"
+    nginx.ingress.kubernetes.io/auth-signin: "http://login.kagent.local/?rd=$escaped_request_uri"
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-User"
+    # Çerezin ve orijinal isteğin auth servisine iletilmesini garanti eder:
+    nginx.ingress.kubernetes.io/auth-snippet: |
+      proxy_set_header Cookie $http_cookie;
+      proxy_set_header Host login.kagent.local;
 spec:
   rules:
   - host: chat.kagent.local

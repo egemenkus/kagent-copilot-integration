@@ -414,7 +414,8 @@ PORTAL_HTML = """<!DOCTYPE html>
             const btnGo = document.getElementById('btnGoChat');
             if (btnGo) {
                 btnGo.style.display = 'inline-flex';
-                setTimeout(() => { window.location.href = "http://chat.kagent.local"; }, 2000);
+                const targetRd = new URLSearchParams(window.location.search).get('rd') || 'http://chat.kagent.local';
+            setTimeout(() => { window.location.href = targetRd; }, 1500);
             }
         }
 
