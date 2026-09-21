@@ -679,13 +679,8 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                                 USER_SESSIONS[token] = session
                                 break
 
-            # 3. If token is shared cluster key or still not found, fallback to any active user in /dev/shm/users
-            if not session:
-                for f in os.listdir(SHM_DIR):
-                    if f.endswith(".json"):
-                        with open(os.path.join(SHM_DIR, f)) as sfile:
-                            session = json.load(sfile)
-                            break
+            # 3. Katı İzolasyon: Asla başka kullanıcının tokenine fallback yapılmaz. 
+            # Eşleşen geçerli oturum yoksa istek kesinlikle reddedilir.
             
             if not session:
                 self.send_response(401)
