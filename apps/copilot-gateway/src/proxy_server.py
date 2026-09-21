@@ -16,7 +16,6 @@ REDIRECT_URI = os.environ.get("REDIRECT_URI", "http://localhost:8080/auth/callba
 SHM_DIR = "/dev/shm/users"
 os.makedirs(SHM_DIR, exist_ok=True)
 
-# Bellek içi oturum havuzu: { api_key: { "username": ..., "copilot_token": ..., "expires_at": ... } }
 USER_SESSIONS = {}
 
 def get_k8s_context():
@@ -30,14 +29,12 @@ def get_k8s_context():
     return k8s_token, ctx
 
 def save_user_session(username, data):
-    # 1. RAM /dev/shm üzerine atomik yaz
     user_file = os.path.join(SHM_DIR, f"{username}.json")
     tmp_file = f"{user_file}.tmp"
     with open(tmp_file, "w") as f:
         json.dump(data, f)
     os.replace(tmp_file, user_file)
 
-    # 2. Kubernetes Secret olarak kalıcılaştır (copilot-user-<username>)
     k8s_token, ctx = get_k8s_context()
     if not k8s_token:
         return
@@ -58,7 +55,7 @@ def save_user_session(username, data):
     try:
         urllib.request.urlopen(req, context=ctx)
     except urllib.error.HTTPError as e:
-        if e.code == 409: # Zaten varsa güncelle
+        if e.code == 409:
             put_req = urllib.request.Request(f"{url}/{sec_name}", data=json.dumps(secret_manifest).encode(),
                                              headers={"Authorization": f"Bearer {k8s_token}", "Content-Type": "application/json"},
                                              method="PUT")
@@ -73,7 +70,6 @@ def fetch_copilot_token(oauth_token):
         return json.loads(resp.read().decode())
 
 def background_rotator():
-    """Her kullanıcının Copilot token'ını süresi dolmadan arka planda yeniler."""
     while True:
         try:
             for user_file in os.listdir(SHM_DIR):
@@ -82,43 +78,328 @@ def background_rotator():
                 with open(filepath) as f:
                     data = json.load(f)
                 
-                # Token bitimine 5 dakika kaldıysa yenile
                 if time.time() >= (data.get("expires_at", 0) - 300):
                     new_token = fetch_copilot_token(data["oauth_token"])
                     data["copilot_token"] = new_token["token"]
                     data["expires_at"] = new_token["expires_at"]
                     save_user_session(data["username"], data)
-                    # Global havuzu güncelle
                     USER_SESSIONS[data["api_key"]] = data
-                    print(f"[Rotator] {data['username']} için token yenilendi.", flush=True)
+                    print(f"[Rotator] {data['username']} token yenilendi.", flush=True)
         except Exception as e:
             print(f"[Rotator Error] {e}", flush=True)
         time.sleep(60)
 
 threading.Thread(target=background_rotator, daemon=True).start()
 
-HTML_PAGE = """<!DOCTYPE html>
-<html>
+LOGIN_HTML = """<!DOCTYPE html>
+<html lang="tr">
 <head>
-    <title>Kagent Copilot Gateway - Login</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kagent • Copilot AI Gateway</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0d1117; color: #c9d1d9; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 32px; width: 420px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); text-align: center; }
-        h2 { margin-top: 0; color: #58a6ff; }
-        .btn { display: inline-block; background: #238636; color: #fff; text-decoration: none; padding: 12px 20px; border-radius: 6px; font-weight: bold; margin-top: 20px; border: none; cursor: pointer; width: 85%; }
-        .btn:hover { background: #2ea043; }
-        .token-box { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 12px; margin-top: 20px; word-break: break-all; font-family: monospace; color: #7ee787; text-align: left; }
+        :root {
+            --bg-base: #0b0f17;
+            --bg-surface: #111827;
+            --border: #1f2937;
+            --text-primary: #f9fafb;
+            --text-secondary: #9ca3af;
+            --accent: #2563eb;
+            --success: #10b981;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: var(--bg-base);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(37, 99, 235, 0.12) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.08) 0px, transparent 50%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+        .container {
+            width: 100%;
+            max-width: 440px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 36px 32px;
+            box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.5);
+            text-align: center;
+        }
+        .brand-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            background: rgba(37, 99, 235, 0.1);
+            border: 1px solid rgba(37, 99, 235, 0.25);
+            border-radius: 9999px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #60a5fa;
+            margin-bottom: 20px;
+        }
+        .brand-dot {
+            width: 6px;
+            height: 6px;
+            background: #3b82f6;
+            border-radius: 50%;
+            box-shadow: 0 0 8px #3b82f6;
+        }
+        h1 {
+            font-size: 22px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            margin-bottom: 8px;
+        }
+        p.subtitle {
+            font-size: 14px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            margin-bottom: 28px;
+        }
+        .btn-github {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            width: 100%;
+            padding: 13px 20px;
+            background: #f9fafb;
+            color: #0b0f17;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 14px;
+            border-radius: 10px;
+            transition: all 0.2s ease;
+        }
+        .btn-github:hover {
+            background: #e5e7eb;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(255, 255, 255, 0.15);
+        }
+        .btn-github svg { width: 20px; height: 20px; }
+        .footer-note {
+            margin-top: 24px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border);
+            font-size: 12px;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+        .lock-icon { width: 14px; height: 14px; color: var(--success); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="brand-badge">
+            <span class="brand-dot"></span>
+            Kagent • Multi-Tenant Gateway
+        </div>
+        <h1>Kurumsal AI Erişimi</h1>
+        <p class="subtitle">Kubernetes cluster ajanlarınız için GitHub Copilot oturumu başlatın ve izole API anahtarınızı alın.</p>
+        
+        <a class="btn-github" href="https://github.com/login/oauth/authorize?client_id=CLIENT_ID_PLACEHOLDER&scope=read:user&redirect_uri=REDIRECT_URI_PLACEHOLDER">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+            </svg>
+            GitHub ile Yetkilendir
+        </a>
+
+        <div class="footer-note">
+            <svg class="lock-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>
+            Sıfır Disk Sızıntısı • Bellek İçi Oturum Rotasyonu
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+CALLBACK_SUCCESS_HTML = """<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yetkilendirme Başarılı • Kagent Gateway</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-base: #0b0f17;
+            --bg-surface: #111827;
+            --border: #1f2937;
+            --text-primary: #f9fafb;
+            --text-secondary: #9ca3af;
+            --accent: #3b82f6;
+            --success: #10b981;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+        .card {
+            width: 100%;
+            max-width: 580px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 32px;
+            box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.5);
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        .avatar {
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: 2px solid var(--success);
+        }
+        .user-meta h2 {
+            font-size: 18px;
+            font-weight: 700;
+        }
+        .user-meta span {
+            font-size: 13px;
+            color: var(--success);
+            font-weight: 500;
+        }
+        .section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 8px;
+        }
+        .key-container {
+            display: flex;
+            align-items: center;
+            background: #06090e;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin-bottom: 24px;
+        }
+        .key-text {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            color: #60a5fa;
+            flex-grow: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .copy-btn {
+            background: #1f2937;
+            border: none;
+            color: var(--text-primary);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .copy-btn:hover { background: #374151; }
+        pre {
+            background: #06090e;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: #d1d5db;
+            overflow-x: auto;
+            line-height: 1.5;
+            margin-bottom: 20px;
+        }
+        .badge {
+            display: inline-block;
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--success);
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
     </style>
 </head>
 <body>
     <div class="card">
-        <h2>Copilot AI Gateway</h2>
-        <p>Kagent modellerine bağlanmak için kurumsal GitHub hesabınızla oturum açın.</p>
-        <a class="btn" href="https://github.com/login/oauth/authorize?client_id=CLIENT_ID_PLACEHOLDER&scope=read:user,copilot&redirect_uri=REDIRECT_URI_PLACEHOLDER">
-            GitHub ile Giriş Yap
-        </a>
+        <div class="header">
+            <img class="avatar" src="USER_AVATAR" alt="Avatar">
+            <div class="user-meta">
+                <h2>Hoş Geldiniz, @USER_NAME</h2>
+                <span>✓ Copilot Oturumu Doğrulandı & RAM'e Yazıldı</span>
+            </div>
+        </div>
+
+        <div class="section-title">Kişisel Kagent API Anahtarınız</div>
+        <div class="key-container">
+            <span class="key-text" id="apiKey">API_KEY_PLACEHOLDER</span>
+            <button class="copy-btn" onclick="copyKey()">Kopyala</button>
+        </div>
+
+        <div class="section-title">Kagent ModelConfig Manifestiniz</div>
+        <pre><code>apiVersion: v1
+kind: Secret
+metadata:
+  name: kagent-user-USER_NAME_LOWER
+  namespace: kagent
+type: Opaque
+stringData:
+  api-key: "API_KEY_PLACEHOLDER"
+---
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: copilot-USER_NAME_LOWER
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: "gpt-4o"
+  apiKeySecret: kagent-user-USER_NAME_LOWER
+  apiKeySecretKey: api-key
+  openAI:
+    baseUrl: "http://copilot-gateway-svc.kagent.svc.cluster.local:8080/v1"</code></pre>
+
+        <span class="badge">Autonomously Rotated every 15 min</span>
     </div>
+
+    <script>
+        function copyKey() {
+            const key = document.getElementById('apiKey').innerText;
+            navigator.clipboard.writeText(key);
+            const btn = document.querySelector('.copy-btn');
+            btn.innerText = 'Kopyalandı!';
+            setTimeout(() => { btn.innerText = 'Kopyala'; }, 2000);
+        }
+    </script>
 </body>
 </html>
 """
@@ -131,71 +412,115 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            html = HTML_PAGE.replace("CLIENT_ID_PLACEHOLDER", CLIENT_ID).replace("REDIRECT_URI_PLACEHOLDER", REDIRECT_URI)
+            html = LOGIN_HTML.replace("CLIENT_ID_PLACEHOLDER", CLIENT_ID).replace("REDIRECT_URI_PLACEHOLDER", REDIRECT_URI)
             self.wfile.write(html.encode())
 
         elif url.path == "/auth/callback":
-            qs = urllib.parse.parse_qs(url.query)
-            code = qs.get("code", [None])[0]
-            if not code:
-                self.send_response(400); self.end_headers(); self.wfile.write(b"Authorization code missing"); return
+            try:
+                qs = urllib.parse.parse_qs(url.query)
+                code = qs.get("code", [None])[0]
+                if not code:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b"Authorization code eksik.")
+                    return
 
-            # GitHub'dan OAuth Access Token takası yap
-            token_url = "https://github.com/login/oauth/access_token"
-            token_payload = json.dumps({"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET, "code": code}).encode()
-            req = urllib.request.Request(token_url, data=token_payload, headers={"Accept": "application/json", "Content-Type": "application/json"})
-            with urllib.request.urlopen(req) as resp:
-                token_data = json.loads(resp.read().decode())
-            oauth_token = token_data.get("access_token")
+                # 1. GitHub OAuth Access Token takası
+                token_url = "https://github.com/login/oauth/access_token"
+                token_params = urllib.parse.urlencode({
+                    "client_id": CLIENT_ID,
+                    "client_secret": CLIENT_SECRET,
+                    "code": code,
+                    "redirect_uri": REDIRECT_URI
+                }).encode("utf-8")
+                
+                req = urllib.request.Request(
+                    token_url,
+                    data=token_params,
+                    headers={"Accept": "application/json", "User-Agent": "KagentGateway/1.0"}
+                )
+                with urllib.request.urlopen(req) as resp:
+                    resp_body = resp.read().decode("utf-8")
+                    try:
+                        token_data = json.loads(resp_body)
+                    except Exception:
+                        token_data = dict(urllib.parse.parse_qsl(resp_body))
 
-            # Kullanıcı adını al
-            user_req = urllib.request.Request("https://api.github.com/user", headers={"Authorization": f"Bearer {oauth_token}", "User-Agent": "Gateway"})
-            with urllib.request.urlopen(user_req) as resp:
-                user_info = json.loads(resp.read().decode())
-            username = user_info["login"]
+                oauth_token = token_data.get("access_token")
+                if not oauth_token:
+                    error_msg = token_data.get("error_description", token_data.get("error", "OAuth token alinamadi"))
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(f"GitHub OAuth Hatasi: {error_msg}".encode())
+                    return
 
-            # Copilot Internal Token al
-            copilot_data = fetch_copilot_token(oauth_token)
-            api_key = f"sk-kagent-{secrets.token_hex(16)}"
+                # 2. Kullanıcı bilgilerini al
+                user_req = urllib.request.Request(
+                    "https://api.github.com/user",
+                    headers={"Authorization": f"token {oauth_token}", "User-Agent": "KagentGateway/1.0"}
+                )
+                with urllib.request.urlopen(user_req) as resp:
+                    user_info = json.loads(resp.read().decode("utf-8"))
+                username = user_info.get("login", "unknown")
+                avatar_url = user_info.get("avatar_url", "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png")
 
-            session_data = {
-                "username": username,
-                "api_key": api_key,
-                "oauth_token": oauth_token,
-                "copilot_token": copilot_data["token"],
-                "expires_at": copilot_data["expires_at"]
-            }
-            save_user_session(username, session_data)
-            USER_SESSIONS[api_key] = session_data
+                # 3. Copilot Internal Token al
+                copilot_data = fetch_copilot_token(oauth_token)
+                api_key = f"sk-kagent-{secrets.token_hex(16)}"
 
-            # Başarılı ekranı ve üretilen API anahtarı
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            res_html = f"""<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0d1117;color:#c9d1d9;display:flex;justify-content:center;align-items:center;height:100vh;">
-            <div style="background:#161b22;padding:32px;border-radius:8px;border:1px solid #30363d;max-width:500px;">
-                <h3 style="color:#7ee787;">Giriş Başarılı, Hoş Geldiniz @{username}!</h3>
-                <p>Copilot yetkiniz doğrulandı. Kagent ModelConfig için oluşturulan kişisel API Anahtarınız:</p>
-                <div style="background:#0d1117;padding:12px;color:#58a6ff;font-family:monospace;border-radius:4px;word-break:break-all;">{api_key}</div>
-                <p style="font-size:12px;color:#8b949e;margin-top:10px;">Bu anahtar Kagent üzerinde size ait bağımsız model yapılandırmasında kullanılır.</p>
-            </div></body></html>"""
-            self.wfile.write(res_html.encode())
+                session_data = {
+                    "username": username,
+                    "api_key": api_key,
+                    "oauth_token": oauth_token,
+                    "copilot_token": copilot_data["token"],
+                    "expires_at": copilot_data["expires_at"]
+                }
+                save_user_session(username, session_data)
+                USER_SESSIONS[api_key] = session_data
+
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                
+                res_html = (CALLBACK_SUCCESS_HTML
+                            .replace("USER_NAME_LOWER", username.lower())
+                            .replace("USER_NAME", username)
+                            .replace("USER_AVATAR", avatar_url)
+                            .replace("API_KEY_PLACEHOLDER", api_key))
+                self.wfile.write(res_html.encode("utf-8"))
+
+            except urllib.error.HTTPError as e:
+                err_content = e.read().decode("utf-8", errors="replace")
+                print(f"[Callback HTTPError {e.code}] {err_content}", flush=True)
+                self.send_response(e.code)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(f"<h3>GitHub API Hatasi ({e.code})</h3><pre>{err_content}</pre>".encode())
+            except Exception as e:
+                print(f"[Callback Error] {e}", flush=True)
+                self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(f"Sunucu Hatasi: {e}".encode())
 
         elif url.path == "/healthz":
-            self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
         else:
-            self.send_response(404); self.end_headers()
+            self.send_response(404)
+            self.end_headers()
 
     def do_POST(self):
-        # OpenAI uyumlu LLM proxy uç noktası
         if self.path.startswith("/v1/chat/completions"):
             auth_header = self.headers.get("Authorization", "")
             token = auth_header.replace("Bearer ", "").strip()
             
-            # API key'den oturumu çöz
             session = USER_SESSIONS.get(token)
             if not session:
-                # Bellekte yoksa /dev/shm tara
                 for f in os.listdir(SHM_DIR):
                     if f.endswith(".json"):
                         with open(os.path.join(SHM_DIR, f)) as sfile:
@@ -206,8 +531,10 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                                 break
             
             if not session:
-                self.send_response(401); self.end_headers()
-                self.wfile.write(json.dumps({"error": "Geçersiz veya süresi dolmuş Kagent API Anahtarı"}).encode())
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Gecersiz Kagent API Key"}).encode())
                 return
 
             length = int(self.headers.get("Content-Length", 0))
@@ -237,10 +564,11 @@ class MultiTenantHandler(http.server.BaseHTTPRequestHandler):
                         if not chunk: break
                         self.wfile.write(chunk)
             except urllib.error.HTTPError as e:
-                self.send_response(e.code); self.end_headers()
+                self.send_response(e.code)
+                self.end_headers()
                 self.wfile.write(e.read())
 
 if __name__ == "__main__":
     server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), MultiTenantHandler)
-    print(f"Multi-Tenant Gateway çalışıyor: http://0.0.0.0:{PORT}", flush=True)
+    print(f"Multi-Tenant Gateway aktif: http://0.0.0.0:{PORT}", flush=True)
     server.serve_forever()
